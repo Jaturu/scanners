@@ -12,7 +12,7 @@ changed: a new Trivy or Grype release, a new database, or a new base image.
 
 | Tag | Contents |
 |---|---|
-| `latest` | Trivy, Grype, Trivy vulnerability DB, Trivy Java DB, Grype DB |
+| `latest` | Trivy, Grype, Trivy vulnerability DB, Trivy Java DB, Trivy checks bundle, Grype DB |
 | `slim` | Same as `latest` without the Trivy Java DB |
 | `YYYYMMDD.HHMM` | A specific `latest` build (UTC build time) |
 | `YYYYMMDD.HHMM-slim` | A specific `slim` build |
@@ -60,6 +60,7 @@ The image sets these so both tools stay offline:
 TRIVY_CACHE_DIR=/opt/scanners/trivy
 TRIVY_SKIP_DB_UPDATE=true
 TRIVY_SKIP_JAVA_DB_UPDATE=true
+TRIVY_SKIP_CHECK_UPDATE=true
 GRYPE_DB_CACHE_DIR=/opt/scanners/grype
 GRYPE_DB_AUTO_UPDATE=false
 GRYPE_CHECK_FOR_APP_UPDATE=false
@@ -73,16 +74,18 @@ The image runs as any UID. Trivy writes its scan cache under
 - Grype refuses a database older than 120 hours (its default). If nightly
   builds stop, scans with Grype start failing after five days instead of
   silently using stale data.
-- Trivy's misconfiguration checks bundle is not included. For offline
-  `--scanners misconfig` runs, add `--skip-check-update`.
+- The Trivy checks bundle used by misconfiguration scans (`trivy config`,
+  `--scanners misconfig`) is pinned to major version 2, the version current
+  Trivy releases expect. A future Trivy release that moves to a new major
+  version needs `TRIVY_CHECKS_REPO` in the Dockerfile updated.
 
 ## How it is built
 
 `.github/workflows/build.yml` runs nightly and on changes to the build files.
 
 1. `check` resolves every input to an exact version: tool release tags, the
-   base image digest, the Trivy DB digests, and the Grype DB archive with its
-   checksum. A hash of those inputs is compared with the
+   base image digest, the Trivy DB and checks bundle digests, and the Grype
+   DB archive with its checksum. A hash of those inputs is compared with the
    `io.scanners.fingerprint` label on the published image. A variant whose
    hash is unchanged is skipped.
 2. `build` runs on a native amd64 runner and a native arm64 runner. Each

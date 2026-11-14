@@ -65,6 +65,7 @@ jobs:
           BASE_IMAGE=$(pin "$(arg BASE_IMAGE)")
           TRIVY_DB_REPO=$(pin "$(arg TRIVY_DB_REPO)")
           TRIVY_JAVA_DB_REPO=$(pin "$(arg TRIVY_JAVA_DB_REPO)")
+          TRIVY_CHECKS_REPO=$(pin "$(arg TRIVY_CHECKS_REPO)")
           GRYPE_DB_URL=https://grype.anchore.io/databases/v6/$(jq -er .path <<<"$g")?checksum=$(jq -er '.checksum|@uri' <<<"$g")
           EOF
           )

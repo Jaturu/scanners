@@ -22,12 +22,18 @@ COPY --from=grype-host /grype              /usr/local/bin/grype
 # Defaults (latest, unverified) are for local builds.
 ARG TRIVY_DB_REPO=ghcr.io/aquasecurity/trivy-db:2
 ARG TRIVY_JAVA_DB_REPO=ghcr.io/aquasecurity/trivy-java-db:1
+ARG TRIVY_CHECKS_REPO=ghcr.io/aquasecurity/trivy-checks:2
 ARG GRYPE_DB_URL=
 ENV GRYPE_DB_CACHE_DIR=/opt/scanners/grype
 RUN trivy image --cache-dir /opt/scanners/trivy --download-db-only --no-progress \
       --db-repository "$TRIVY_DB_REPO" \
  && trivy image --cache-dir /opt/scanners/trivy --download-java-db-only --no-progress \
       --java-db-repository "$TRIVY_JAVA_DB_REPO" \
+ # No download-only flag for checks: a config scan of an empty dir fetches them.
+ # It falls back to embedded checks on failure, so verify the bundle landed.
+ && mkdir /tmp/empty \
+ && trivy config --cache-dir /opt/scanners/trivy --checks-bundle-repository "$TRIVY_CHECKS_REPO" /tmp/empty \
+ && test -d /opt/scanners/trivy/policy/content \
  && rm -rf /opt/scanners/trivy/fanal \
  # Pin DownloadedAt to UpdatedAt so an unchanged DB gives an identical layer
  && sed -i -E 's/("UpdatedAt":"([^"]*)".*"DownloadedAt":")[^"]*/\1\2/' \
@@ -51,10 +57,12 @@ COPY --from=trivy-bin /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=grype-bin /grype              /usr/local/bin/grype
 COPY --from=db /opt/scanners/trivy/db /opt/scanners/trivy/db
 COPY --from=db /opt/scanners/grype /opt/scanners/grype
+COPY --from=db /opt/scanners/trivy/policy /opt/scanners/trivy/policy
 
 ENV TRIVY_CACHE_DIR=/opt/scanners/trivy \
     TRIVY_SKIP_DB_UPDATE=true \
     TRIVY_SKIP_JAVA_DB_UPDATE=true \
+    TRIVY_SKIP_CHECK_UPDATE=true \
     TRIVY_NO_PROGRESS=true \
     GRYPE_DB_CACHE_DIR=/opt/scanners/grype \
     GRYPE_DB_AUTO_UPDATE=false \
