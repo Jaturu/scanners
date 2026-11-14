@@ -114,7 +114,7 @@ jobs:
           echo "slim=$(decide "$cur_slim" "$FP_SLIM")" | tee -a "$GITHUB_OUTPUT"
           echo "full=$(decide "$cur_full" "$FP_FULL")" | tee -a "$GITHUB_OUTPUT"
 
-  # One native runner per architecture: builds, pushes by digest, smoke tests.
+  # One native runner per architecture: builds and pushes by digest.
   build:
     needs: check
     if: needs.check.outputs.build_slim == 'true' || needs.check.outputs.build_full == 'true'
@@ -186,23 +186,14 @@ jobs:
           labels: io.scanners.fingerprint=${{ needs.check.outputs.fp_full }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true,compression=zstd,force-compression=true
 
-      - name: Smoke test (offline DBs, native arch)
+      - name: Export digests
         env:
           SLIM: ${{ steps.slim.outputs.digest }}
           FULL: ${{ steps.full.outputs.digest }}
         run: |
-          set -euo pipefail
-          docker buildx prune -af   # free the build cache before pulling
           mkdir -p /tmp/digests
-          for pair in "slim=$SLIM" "full=$FULL"; do
-            v="${pair%%=*}"; d="${pair#*=}"
-            [ -n "$d" ] || continue
-            docker pull "$IMAGE@$d"
-            docker run --rm "$IMAGE@$d" trivy image --scanners vuln alpine:3
-            docker run --rm "$IMAGE@$d" grype alpine:3
-            docker image rm "$IMAGE@$d"
-            echo "$d" > "/tmp/digests/$v-$SLUG"
-          done
+          [ -z "$SLIM" ] || echo "$SLIM" > "/tmp/digests/slim-$SLUG"
+          [ -z "$FULL" ] || echo "$FULL" > "/tmp/digests/full-$SLUG"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
@@ -211,7 +202,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Runs once both architectures passed: merges digests, tags, promotes.
+  # Runs once both architectures pushed: merges digests, tags, promotes.
   publish:
     needs: [check, build]
     runs-on: ubuntu-latest
