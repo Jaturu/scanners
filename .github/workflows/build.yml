@@ -1,0 +1,245 @@
+name: build-scanners
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # 06:17 UTC = 01:17 EST / 02:17 EDT
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild both variants even if no input changed
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .github/workflows/build.yml
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: scanners
+  cancel-in-progress: false
+
+jobs:
+  # Pins every build input and compares its fingerprint with the label on the
+  # published floating tag. A variant only builds when its inputs changed.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.in.outputs.image }}
+      stamp: ${{ steps.in.outputs.stamp }}
+      build_args: ${{ steps.in.outputs.build_args }}
+      fp_slim: ${{ steps.fp.outputs.slim }}
+      fp_full: ${{ steps.fp.outputs.full }}
+      build_slim: ${{ steps.cmp.outputs.slim }}
+      build_full: ${{ steps.cmp.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Upstream repos come from the Dockerfile ARG defaults, pinned here by digest.
+      - name: Resolve and pin upstream inputs
+        id: in
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          arg() { sed -n "s/^ARG $1=//p" Dockerfile; }
+          pin() { echo "${1%:*}@$(docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"')"; }
+          trivy=$(gh api repos/aquasecurity/trivy/releases/latest --jq .tag_name)
+          grype=$(gh api repos/anchore/grype/releases/latest --jq .tag_name)
+          g=$(curl -fsS https://grype.anchore.io/databases/v6/latest.json)
+          args=$(cat <<EOF
+          TRIVY_VERSION=${trivy#v}
+          GRYPE_VERSION=${grype}
+          BASE_IMAGE=$(pin "$(arg BASE_IMAGE)")
+          TRIVY_DB_REPO=$(pin "$(arg TRIVY_DB_REPO)")
+          TRIVY_JAVA_DB_REPO=$(pin "$(arg TRIVY_JAVA_DB_REPO)")
+          GRYPE_DB_URL=https://grype.anchore.io/databases/v6/$(jq -er .path <<<"$g")?checksum=$(jq -er '.checksum|@uri' <<<"$g")
+          EOF
+          )
+          echo "$args"
+          {
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/scanners"
+            echo "stamp=$(date -u +%Y%m%d.%H%M)"
+            echo "build_args<<EOF"; echo "$args"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute fingerprints
+        id: fp
+        env:
+          ARGS: ${{ steps.in.outputs.build_args }}
+        run: |
+          set -euo pipefail
+          slim=$( { grep -v '^TRIVY_JAVA_DB_REPO=' <<<"$ARGS"
+                    sha256sum Dockerfile .github/workflows/build.yml; } | sha256sum | cut -d' ' -f1)
+          full=$( { echo "$slim"; grep '^TRIVY_JAVA_DB_REPO=' <<<"$ARGS"; } | sha256sum | cut -d' ' -f1)
+          echo "slim=$slim" | tee -a "$GITHUB_OUTPUT"
+          echo "full=$full" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Compare with published images
+        id: cmp
+        env:
+          IMAGE: ${{ steps.in.outputs.image }}
+          FP_SLIM: ${{ steps.fp.outputs.slim }}
+          FP_FULL: ${{ steps.fp.outputs.full }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          # Only a genuine not-found means "never published"; other errors fail the run.
+          current() {
+            local out
+            if out=$(docker buildx imagetools inspect "$1" \
+                --format '{{ index (index .Image "linux/amd64").Config.Labels "io.scanners.fingerprint" }}' 2>&1); then
+              echo "$out"
+            elif grep -qiE 'not found|MANIFEST_UNKNOWN|NAME_UNKNOWN|404' <<<"$out"; then
+              echo ""
+            else
+              echo "$out" >&2; return 1
+            fi
+          }
+          cur_slim=$(current "$IMAGE:slim")
+          cur_full=$(current "$IMAGE:latest")
+          decide() { if [ "$FORCE" = true ] || [ "$1" != "$2" ]; then echo true; else echo false; fi; }
+          echo "slim=$(decide "$cur_slim" "$FP_SLIM")" | tee -a "$GITHUB_OUTPUT"
+          echo "full=$(decide "$cur_full" "$FP_FULL")" | tee -a "$GITHUB_OUTPUT"
+
+  # One native runner per architecture: builds, pushes by digest, smoke tests.
+  build:
+    needs: check
+    if: needs.check.outputs.build_slim == 'true' || needs.check.outputs.build_full == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      IMAGE: ${{ needs.check.outputs.image }}
+      BUILD_SLIM: ${{ needs.check.outputs.build_slim }}
+      BUILD_FULL: ${{ needs.check.outputs.build_full }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive platform slug and SOURCE_DATE_EPOCH
+        run: |
+          p="${{ matrix.platform }}"
+          echo "SLUG=${p//\//-}" >> "$GITHUB_ENV"
+          # Constant across nightly runs, so unchanged files produce identical layers.
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # The DBs need ~7 GB per image; preinstalled toolchains are not used here.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push slim by digest
+        id: slim
+        if: env.BUILD_SLIM == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: slim
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: ${{ needs.check.outputs.build_args }}
+          labels: io.scanners.fingerprint=${{ needs.check.outputs.fp_slim }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true
+
+      # Same builder and build args as slim, so the shared stages come from cache.
+      - name: Build and push full by digest
+        id: full
+        if: env.BUILD_FULL == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: full
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: ${{ needs.check.outputs.build_args }}
+          labels: io.scanners.fingerprint=${{ needs.check.outputs.fp_full }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true
+
+      - name: Smoke test (offline DBs, native arch)
+        env:
+          SLIM: ${{ steps.slim.outputs.digest }}
+          FULL: ${{ steps.full.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx prune -af   # free the build cache before pulling
+          mkdir -p /tmp/digests
+          for pair in "slim=$SLIM" "full=$FULL"; do
+            v="${pair%%=*}"; d="${pair#*=}"
+            [ -n "$d" ] || continue
+            docker pull "$IMAGE@$d"
+            docker run --rm "$IMAGE@$d" trivy image --scanners vuln alpine:3
+            docker run --rm "$IMAGE@$d" grype alpine:3
+            docker image rm "$IMAGE@$d"
+            echo "$d" > "/tmp/digests/$v-$SLUG"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.SLUG }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Runs once both architectures passed: merges digests, tags, promotes.
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ needs.check.outputs.image }}
+      STAMP: ${{ needs.check.outputs.stamp }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge, tag, and promote
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          ls -l
+          publish() {  # variant, dated tag, floating tag
+            local refs=() f
+            for f in "$1"-*; do [ -e "$f" ] && refs+=("$IMAGE@$(cat "$f")"); done
+            [ "${#refs[@]}" -eq 0 ] && return 0
+            [ "${#refs[@]}" -eq 2 ] || { echo "$1: expected 2 platform digests, got ${#refs[@]}" >&2; exit 1; }
+            docker buildx imagetools create -t "$IMAGE:$2" "${refs[@]}"
+            docker buildx imagetools create -t "$IMAGE:$3" "$IMAGE:$2"
+          }
+          publish slim "$STAMP-slim" slim
+          publish full "$STAMP" latest
