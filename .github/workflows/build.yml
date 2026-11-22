@@ -2,7 +2,8 @@ name: build-scanners
 
 on:
   schedule:
-    - cron: "17 6 * * *"   # 06:17 UTC = 01:17 EST / 02:17 EDT
+    - cron: "17 1 * * *"
+      timezone: "America/New_York"
   workflow_dispatch:
     inputs:
       force:
