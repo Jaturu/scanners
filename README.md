@@ -2,17 +2,17 @@
 
 A container image with [Trivy](https://github.com/aquasecurity/trivy) and
 [Grype](https://github.com/anchore/grype) and their vulnerability databases
-already inside it. CI jobs can scan without downloading databases at run time
+already inside it, plus [Syft](https://github.com/anchore/syft) for SBOMs. CI jobs can scan without downloading databases at run time
 and without reaching upstream database servers.
 
 The image is rebuilt nightly, but only when something it is built from has
-changed: a new Trivy or Grype release, a new database, or a new base image.
+changed: a new Trivy, Grype or Syft release, a new database, or a new base image.
 
 ## Tags
 
 | Tag | Contents |
 |---|---|
-| `latest` | Trivy, Grype, Trivy vulnerability DB, Trivy Java DB, Trivy checks bundle, Grype DB |
+| `latest` | Trivy, Grype, Syft, Trivy vulnerability DB, Trivy Java DB, Trivy checks bundle, Grype DB |
 | `slim` | Same as `latest` without the Trivy Java DB |
 | `YYYYMMDD.HHMM` | A specific `latest` build (UTC build time) |
 | `YYYYMMDD.HHMM-slim` | A specific `slim` build |
@@ -64,6 +64,15 @@ TRIVY_SKIP_CHECK_UPDATE=true
 GRYPE_DB_CACHE_DIR=/opt/scanners/grype
 GRYPE_DB_AUTO_UPDATE=false
 GRYPE_CHECK_FOR_APP_UPDATE=false
+SYFT_CHECK_FOR_APP_UPDATE=false
+```
+
+Syft needs no database. An SBOM it writes can go straight to Grype:
+
+```sh
+docker run --rm -v "$PWD:/work" ghcr.io/jaturu/scanners:latest \
+  sh -c 'syft docker-archive:/work/myapp.tar -o cyclonedx-json=/work/sbom.json \
+    && grype sbom:/work/sbom.json'
 ```
 
 The image runs as any UID. Trivy writes its scan cache under

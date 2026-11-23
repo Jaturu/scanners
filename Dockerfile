@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1
 ARG TRIVY_VERSION=latest
 ARG GRYPE_VERSION=latest
+ARG SYFT_VERSION=latest
 ARG BASE_IMAGE=debian:trixie-slim
 
 # Tool binaries for the TARGET architecture (end up in the final image)
 FROM ghcr.io/aquasecurity/trivy:${TRIVY_VERSION} AS trivy-bin
 FROM ghcr.io/anchore/grype:${GRYPE_VERSION}      AS grype-bin
+# Syft needs no database, so it has no host-side copy and no DB stage.
+FROM ghcr.io/anchore/syft:${SYFT_VERSION}        AS syft-bin
 
 # Tool binaries for the BUILD host (DB download runs natively, never under QEMU)
 FROM --platform=$BUILDPLATFORM ghcr.io/aquasecurity/trivy:${TRIVY_VERSION} AS trivy-host
@@ -49,12 +52,14 @@ RUN trivy image --cache-dir /opt/scanners/trivy --download-db-only --no-progress
 FROM ${BASE_IMAGE} AS slim
 ARG TRIVY_VERSION
 ARG GRYPE_VERSION
+ARG SYFT_VERSION
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p -m 0777 /opt/scanners/trivy
 COPY --from=trivy-bin /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=grype-bin /grype              /usr/local/bin/grype
+COPY --from=syft-bin  /syft               /usr/local/bin/syft
 COPY --from=db /opt/scanners/trivy/db /opt/scanners/trivy/db
 COPY --from=db /opt/scanners/grype /opt/scanners/grype
 COPY --from=db /opt/scanners/trivy/policy /opt/scanners/trivy/policy
@@ -66,14 +71,16 @@ ENV TRIVY_CACHE_DIR=/opt/scanners/trivy \
     TRIVY_NO_PROGRESS=true \
     GRYPE_DB_CACHE_DIR=/opt/scanners/grype \
     GRYPE_DB_AUTO_UPDATE=false \
-    GRYPE_CHECK_FOR_APP_UPDATE=false
+    GRYPE_CHECK_FOR_APP_UPDATE=false \
+    SYFT_CHECK_FOR_APP_UPDATE=false
 
 LABEL org.opencontainers.image.title="scanners" \
-      org.opencontainers.image.description="Trivy + Grype with pre-baked vulnerability databases" \
+      org.opencontainers.image.description="Trivy, Grype and Syft, with pre-baked vulnerability databases" \
       io.scanners.trivy-version="${TRIVY_VERSION}" \
-      io.scanners.grype-version="${GRYPE_VERSION}"
+      io.scanners.grype-version="${GRYPE_VERSION}" \
+      io.scanners.syft-version="${SYFT_VERSION}"
 
-RUN trivy --version && grype version
+RUN trivy --version && grype version && syft version
 WORKDIR /work
 CMD ["bash"]
 

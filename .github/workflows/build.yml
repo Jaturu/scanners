@@ -59,10 +59,12 @@ jobs:
           pin() { echo "${1%:*}@$(docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"')"; }
           trivy=$(gh api repos/aquasecurity/trivy/releases/latest --jq .tag_name)
           grype=$(gh api repos/anchore/grype/releases/latest --jq .tag_name)
+          syft=$(gh api repos/anchore/syft/releases/latest --jq .tag_name)
           g=$(curl -fsS https://grype.anchore.io/databases/v6/latest.json)
           args=$(cat <<EOF
           TRIVY_VERSION=${trivy#v}
           GRYPE_VERSION=${grype}
+          SYFT_VERSION=${syft}
           BASE_IMAGE=$(pin "$(arg BASE_IMAGE)")
           TRIVY_DB_REPO=$(pin "$(arg TRIVY_DB_REPO)")
           TRIVY_JAVA_DB_REPO=$(pin "$(arg TRIVY_JAVA_DB_REPO)")
